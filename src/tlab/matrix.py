@@ -1,4 +1,5 @@
 from __future__ import annotations
+import sys
 import re
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -107,13 +108,28 @@ def _parse_matrix_from(lines: list[str], start_idx: int) -> Tuple[np.ndarray, in
             M[r-1, c-1] = v
     return M, k
 
-def getmat(out_path: str, string: str) -> List[np.ndarray]:
+def getmat(out_path: str, string: str, all: bool = False
+           ) -> Union[List[np.ndarray], Optional[np.ndarray]]:
     """
-    Get matrix (matrices) named `string` from `out_path`. 
-    `out_path`のファイル内を検索し、`string`の文字列から始まる行列を抜き出してnumpyの配列に入れます。
+    Get matrix (matrices) named `string` from `out_path`.
+
+    Parameters
+    ----------
+    out_path : str
+        出力ファイルのパス
+    string : str
+        見出し（この文字列を含む行の直後から行列ブロックを探す）
+    all : bool, default True
+        True のときは見つかったすべての行列を List[np.ndarray] で返す。
+        False のときは最初の行列のみ np.ndarray を返す（見つからなければ None）。
+
+    Returns
+    -------
+    List[np.ndarray] | np.ndarray | None
     """
     lines = Path(out_path).read_text(encoding="utf-8", errors="ignore").splitlines()
-    mats: list[np.ndarray] = []
+
+    mats: List[np.ndarray] = []
     i = 0
     while i < len(lines):
         found = None
@@ -121,15 +137,29 @@ def getmat(out_path: str, string: str) -> List[np.ndarray]:
             if string in lines[j]:
                 found = j
                 break
+
         if found is None:
-            break
+            break  # これ以上見出しが無い
+
         try:
             M, next_idx = _parse_matrix_from(lines, found + 1)
-            mats.append(M)
-            i = next_idx
         except RuntimeError:
+            # この見出しの直後に行列ブロックが無い/壊れている → 次行から再探索
             i = found + 1
-    return mats
+            continue
+
+        if all:
+            mats.append(M)
+            i = next_idx  # 次のブロック以降を探索
+        else:
+            print(f'Matrix "{string}" found.')
+            return M  # 最初の1件だけ返して終了
+
+    if mats == [] or not all:
+        print(f'No matrix "{string}" found.')
+    else:
+        print(f'{len(mats)} "{string}" matrices found.')
+    return mats if all else None
 
 def printmat(M, title="", col=10, precision=7, width=12, file=None, flush=False):
     """
