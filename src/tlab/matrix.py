@@ -2,10 +2,10 @@ from __future__ import annotations
 import sys
 import re
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Union
 import numpy as np
 
-_INT_COL_RE = re.compile(r"^\s*(\d+(?:\s+\d+)+)\s*$")
+_INT_COL_RE = re.compile(r"^\s*(\d+(?:\s+\d+)*)\s*$")
 _FLOAT_RE = re.compile(r"""
     [+\-]?                      # sign
     (?:\d+(?:\.\d*)?|\.\d+)     # body
@@ -101,10 +101,12 @@ def _parse_matrix_from(lines: list[str], start_idx: int) -> Tuple[np.ndarray, in
     if not data:
         raise RuntimeError("No matrix data captured.")
 
-    N = max(max_row, max_col)
-    M = np.zeros((N, N), dtype=float)
+    # --- ここを正方行列→長方形（非正方）対応に変更 ---
+    nrows = max_row
+    ncols = max_col
+    M = np.zeros((nrows, ncols), dtype=float)
     for (r, c), v in data.items():
-        if 1 <= r <= N and 1 <= c <= N:
+        if 1 <= r <= nrows and 1 <= c <= ncols:
             M[r-1, c-1] = v
     return M, k
 
@@ -112,6 +114,8 @@ def getmat(out_path: str, string: str, all: bool = False
            ) -> Union[List[np.ndarray], Optional[np.ndarray]]:
     """
     Get matrix (matrices) named `string` from `out_path`.
+
+    - 列数 ≠ 行数の長方形行列にも対応します（出力は (max_row, max_col)）。
 
     Parameters
     ----------
@@ -152,46 +156,59 @@ def getmat(out_path: str, string: str, all: bool = False
             mats.append(M)
             i = next_idx  # 次のブロック以降を探索
         else:
-            print(f'Matrix "{string}" found.')
+            print(f'Matrix "{string}" found. shape={M.shape}')
             return M  # 最初の1件だけ返して終了
 
     if mats == [] or not all:
         print(f'No matrix "{string}" found.')
     else:
-        print(f'{len(mats)} "{string}" matrices found.')
+        print(f'{len(mats)} "{string}" matrices found. shapes={[m.shape for m in mats]}')
     return mats if all else None
-
-def printmat(M, title="", col=10, precision=7, width=12, file=None, flush=False):
+def printmat(M, title: str = "", col: int = 10, precision: int = 7,
+             width: int = 12, file=None, flush: bool = False):
     """
     Return a string that prints matrix `M` in a block format:
       - Column indices shown in blocks (default 10 per block)
       - Row index at the left
       - Fixed-width floats with given precision
-    numpyの２次元配列で与えられた行列`M`を見やすく表示します。
-    以下オプション：
-    `title`で名前をつけます。
-    `col`は1ブロックあたりのカラムの数でデフォルトは10です。
-    `precision`は桁数です。
-    `width`はどれくらい幅を取るかです。
-    `file`を設定するとそのファイルに書き出します。
-    `flush`をするとバッファがたまる前にすぐに書き出します。
+
+    numpy の 2 次元配列で与えられた行列 `M` を見やすく表示します（非正方可）。
+    オプションは従来どおり。
+
+    Parameters
+    ----------
+    M : array-like, shape (nrows, ncols)
+        行列（非正方も可）
+    title : str
+        タイトル行
+    col : int
+        1 ブロックあたりの列数
+    precision : int
+        小数点以下桁数
+    width : int
+        各数値フィールド幅
+    file : IO or None
+        出力先（未指定なら sys.stdout）
+    flush : bool
+        出力後に flush する
     """
     A = np.asarray(M, dtype=float)
-    if A.ndim != 2 or A.shape[0] != A.shape[1]:
-        raise ValueError("M must be a square 2D array")
-    N = A.shape[0]
+    if A.ndim != 2:
+        raise ValueError("M must be a 2D array")
+    nrows, ncols = A.shape
 
     if file is None:
         file = sys.stdout
 
-    roww = max(5, len(str(N)) + 3)  # width for the left row index
+    # 左端の行番号の幅（行数に応じて可変）
+    roww = max(5, len(str(nrows)) + 3)
 
     # Title
     file.write(f" {title}\n\n")
 
-    # Blocks of columns
-    for start in range(0, N, col):
-        end = min(N, start + col)
+    # 列ブロックごとに出力
+    for start in range(0, ncols, col):
+        end = min(ncols, start + col)
 
         # Column header
         file.write(" " * roww)
@@ -200,13 +217,14 @@ def printmat(M, title="", col=10, precision=7, width=12, file=None, flush=False)
         file.write("\n")
 
         # Rows
-        for i in range(N):
+        for i in range(nrows):
             file.write(f"{i+1:>{roww}d}")
-            for j in range(start, end):
-                file.write(f"{A[i, j]: {width}.{precision}f}")
+            for v in A[i, start:end]:
+                file.write(f"{v: {width}.{precision}f}")
             file.write("\n")
         file.write("\n")
 
     if flush:
         file.flush()
     return None
+
