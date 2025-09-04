@@ -1,3 +1,5 @@
+import numpy as np
+import scipy as sp
 def symm(B):
     """
     Given a vector B with the dimension n*(n+1)//2,

@@ -1,5 +1,6 @@
 import numpy as np
 from .matrix import printmat
+from .linalg import symm, Lowdin_orthonormalization
 
 def davidson(H, S=None, nroots=1, diag = None, init_guesses=None, threshold=1e-5, maxiter=100, verbose=0, shift_operator=None, parallel=False):
 
