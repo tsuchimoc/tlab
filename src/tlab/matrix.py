@@ -164,7 +164,7 @@ def getmat(out_path: str, string: str, all: bool = False
     return mats if all else None
 
 import sys
-def printmat(A, title=None, eig=None, mmax=5, n=None, m=None, format="12.7f", ao_labels=None,  file=None):
+def printmat(A: np.array, title: str = None, eig: np.array = None, mmax: int = 5, n: int = None, m: int = None, format: str = "12.7f", ao_labels: list = None,  file: str = None):
     """Function:
     Print out A in a readable format.
 
@@ -191,7 +191,7 @@ def printmat(A, title=None, eig=None, mmax=5, n=None, m=None, format="12.7f", ao
         file = sys.stdout
     if True:
         if title is not None:
-            file.write(f" {title}\n\n")
+            file.write(f" {title}\n")
 
         if format.find('f') != -1:
             ### Float
