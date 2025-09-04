@@ -12,43 +12,41 @@ _FLOAT_RE = re.compile(r"""
     (?:[EDed][+\-]?\d+)?        # exponent with E or D
 """, re.VERBOSE)
 
-def _is_int_columns(line: str) -> Optional[list[int]]:
-    m = _INT_COL_RE.match(line)
-    if not m:
-        return None
-    try:
-        cols = [int(t) for t in m.group(1).split()]
-    except ValueError:
-        return None
-    return cols if cols else None
-
-def _try_parse_row(line: str, ncols: int) -> Optional[Tuple[int, list[float]]]:
-    toks = line.strip().split()
-    if not toks:
-        return None
-    if re.fullmatch(r"\d+", toks[0]):
-        row = int(toks[0])
-        vals_str = toks[1:]
-        if len(vals_str) >= ncols:
-            vals = [float(v.replace("D","E").replace("d","e")) for v in vals_str[:ncols]]
-            return row, vals
-        floats = _FLOAT_RE.findall(line)
-        if len(floats) >= ncols:
-            vals = [float(s.replace("D","E").replace("d","e")) for s in floats[-ncols:]]
-            return row, vals
-    return None
-
-def _looks_like_section_end(line: str) -> bool:
-    s = line.strip()
-    if not s:
-        return False
-    if "Density matrix done" in s:
-        return True
-    if s.startswith("***"):
-        return True
-    return False
-
 def _parse_matrix_from(lines: list[str], start_idx: int) -> Tuple[np.ndarray, int]:
+    def _looks_like_section_end(line: str) -> bool:
+        s = line.strip()
+        if not s:
+            return False
+        if s.startswith("***"):
+            return True
+        return False
+
+    def _try_parse_row(line: str, ncols: int) -> Optional[Tuple[int, list[float]]]:
+        toks = line.strip().split()
+        if not toks:
+            return None
+        if re.fullmatch(r"\d+", toks[0]):
+            row = int(toks[0])
+            vals_str = toks[1:]
+            if len(vals_str) >= ncols:
+                vals = [float(v.replace("D","E").replace("d","e")) for v in vals_str[:ncols]]
+                return row, vals
+            floats = _FLOAT_RE.findall(line)
+            if len(floats) >= ncols:
+                vals = [float(s.replace("D","E").replace("d","e")) for s in floats[-ncols:]]
+                return row, vals
+        return None
+
+    def _is_int_columns(line: str) -> Optional[list[int]]:
+        m = _INT_COL_RE.match(line)
+        if not m:
+            return None
+        try:
+            cols = [int(t) for t in m.group(1).split()]
+        except ValueError:
+            return None
+        return cols if cols else None
+
     k = start_idx
     while k < len(lines) and _is_int_columns(lines[k]) is None:
         if _looks_like_section_end(lines[k]):
@@ -164,67 +162,132 @@ def getmat(out_path: str, string: str, all: bool = False
     else:
         print(f'{len(mats)} "{string}" matrices found. shapes={[m.shape for m in mats]}')
     return mats if all else None
-def printmat(M, title: str = "", col: int = 10, precision: int = 7,
-             width: int = 12, file=None, flush: bool = False):
+
+import sys
+def printmat(A, title=None, eig=None, mmax=5, n=None, m=None, format="12.7f", ao_labels=None,  file=None):
+    """Function:
+    Print out A in a readable format.
+
+        A         :  1D or 2D numpy array of dimension
+        eig       :  Given eigenvectros A[:,i], eig[i] are corresponding eigenvalues (ndarray or list)
+        file      :  file to be printed
+        mmax      :  maxixmum number of columns to print for each block
+        title     :  Name to be printed
+        n,m       :  Need to be specified if A is a matrix,
+                     but loaded as a 1D array
+        format    :  Printing format
+        ao_labels :  AO labels instead of integers for rows.
+
+    Author(s): Takashi Tsuchimochi
     """
-    Return a string that prints matrix `M` in a block format:
-      - Column indices shown in blocks (default 10 per block)
-      - Row index at the left
-      - Fixed-width floats with given precision
-
-    numpy の 2 次元配列で与えられた行列 `M` を見やすく表示します（非正方可）。
-    オプションは従来どおり。
-
-    Parameters
-    ----------
-    M : array-like, shape (nrows, ncols)
-        行列（非正方も可）
-    title : str
-        タイトル行
-    col : int
-        1 ブロックあたりの列数
-    precision : int
-        小数点以下桁数
-    width : int
-        各数値フィールド幅
-    file : IO or None
-        出力先（未指定なら sys.stdout）
-    flush : bool
-        出力後に flush する
-    """
-    A = np.asarray(M, dtype=float)
-    if A.ndim != 2:
-        raise ValueError("M must be a 2D array")
-    nrows, ncols = A.shape
-
+    if isinstance(A, list):
+        dimension = 1
+    elif isinstance(A, np.ndarray):
+        dimension = A.ndim
+    if dimension == 0 or dimension > 2:
+        error("Neither scalar nor tensor is printable with printmat.")
+    
     if file is None:
         file = sys.stdout
+    if True:
+        if title is not None:
+            file.write(f" {title}\n\n")
 
-    # 左端の行番号の幅（行数に応じて可変）
-    roww = max(5, len(str(nrows)) + 3)
-
-    # Title
-    file.write(f" {title}\n\n")
-
-    # 列ブロックごとに出力
-    for start in range(0, ncols, col):
-        end = min(ncols, start + col)
-
-        # Column header
-        file.write(" " * roww)
-        for j in range(start, end):
-            file.write(f"{j+1:>{width}d}")
-        file.write("\n")
-
-        # Rows
-        for i in range(nrows):
-            file.write(f"{i+1:>{roww}d}")
-            for v in A[i, start:end]:
-                file.write(f"{v: {width}.{precision}f}")
-            file.write("\n")
-        file.write("\n")
-
-    if flush:
+        if format.find('f') != -1:
+            ### Float
+            style = "f"
+            idx_f = format.find('f') 
+            idx = format.find('.')
+            digits = int(format[:idx]) 
+            decimal = int(format[idx+1:idx_f])
+        elif format.find('d') != -1:
+            style = "d"
+            idx = format.find('d')
+            digits = int(format[:idx])
+            decimal = '0'
+            format = format[:idx]+'.0f'
+        else:
+            raise TypeError(f'format={format} not supported in printmat.')
+        len_ = digits
+        if format[0] != ' ':
+            format = ' ' + format
+        if format.find('>') == -1:
+            format = '>' + format
+        if dimension == 2:
+            n, m = A.shape
+            imax = 0
+            while imax < m:
+                imin = imax + 1
+                imax = imax + mmax
+                if imax > m:
+                    imax = m
+                file.write('\n')
+                if ao_labels is not None:
+                    space_ao = " "*7
+                else:
+                    space_ao = ""
+                file.write(f"{space_ao}")#file=f)
+                if eig is None:
+                    space = " "*(5)
+                    file.write(f"{space}")#file=f)
+                else:
+                    file.write(" eig |")#file=f)
+                    
+                for i in range(imin-1, imax):
+                    if eig is None:
+                        space = " "*(len_)
+                        file.write(f"{i:>{len_}d} ")#file=f)
+                    else:
+                        file.write(f"{eig[i]:{format}}|")
+                file.write('\n')
+                file.write(f"{space_ao}")
+                if eig is not None:
+                    hyphen = '-'*len_
+                    for i in range(imin-1, imax+1):
+                        file.write(f"{hyphen}")
+                else:
+                    file.write(f"{space}")
+                print()#file=f)
+                for j in range(n):
+                    if ao_labels is None:
+                        file.write(f" {j:4d} ")
+                    else:
+                        file.write(f" {ao_labels[j]:12s}")
+                    for i in range(imin-1, imax):
+                        file.write(f"{A[j][i]:{format}} ")
+                    file.write('\n')
+        elif dimension == 1:
+            if n is None or m is None:
+                if isinstance(A, list):
+                    n = len(A)
+                    m = 1
+                elif isinstance(A, np.ndarray):
+                    n = A.size
+                    m = 1
+            imax = 0
+            while imax < m:
+                imin = imax + 1
+                imax = imax + mmax
+                if imax > m:
+                    imax = m
+                if eig is None:
+                    file.write("           ")
+                else:
+                    file.write(" eig:  ")
+                    
+                for i in range(imin-1, imax):
+                    if eig is None:
+                        file.write(f"{i:{digits-6}d}          ")
+                    else:
+                        file.write(f"  {eig[i]:{format}}  ")
+                file.write('\n')
+                for j in range(n):
+                    if n > 1:
+                        file.write(f" {j:4d}  ")
+                    else:
+                        file.write(f"       ")
+                    for i in range(imin-1, imax):
+                        file.write(f"  {A[j + i*n]:{format}}  ")
+                    file.write('\n')
+        file.write('\n')
         file.flush()
-    return None
-
