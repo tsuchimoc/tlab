@@ -17,9 +17,10 @@ class MatBlock(NamedTuple):
     eig: Optional[List[float]]
     ao_labels: Optional[List[str]]
 
-def _parse_matrix_from(lines: list[str], start_idx: int
-                       ) -> Tuple[np.ndarray, int, Optional[List[float]], Optional[List[str]]]:
-
+def _parse_matrix_from(lines: list[str], start_idx: int):
+    """
+    返り値: (M: np.ndarray, next_idx: int, eigs: Optional[List[float]], ao_labels: Optional[List[str]])
+    """
     def _looks_like_section_end(line: str) -> bool:
         s = line.strip()
         if not s:
@@ -27,6 +28,14 @@ def _parse_matrix_from(lines: list[str], start_idx: int
         if s.startswith("***"):
             return True
         return False
+
+    _INT_COL_RE = re.compile(r"^\s*(\d+(?:\s+\d+)*)\s*$")
+    _FLOAT_RE = re.compile(r"""
+        [+\-]?                      # sign
+        (?:\d+(?:\.\d*)?|\.\d+)     # body
+        (?:[EDed][+\-]?\d+)?        # exponent with E or D
+    """, re.VERBOSE)
+    _EIG_HDR_RE = re.compile(r"\beig\b", re.IGNORECASE)
 
     def _is_int_columns(line: str) -> Optional[list[int]]:
         m = _INT_COL_RE.match(line)
@@ -37,8 +46,6 @@ def _parse_matrix_from(lines: list[str], start_idx: int
         except ValueError:
             return None
         return cols if cols else None
-
-    _EIG_HDR_RE = re.compile(r"\beig\b", re.IGNORECASE)
 
     def _parse_eig_values_from_line(line: str) -> Optional[List[float]]:
         if not _EIG_HDR_RE.search(line):
@@ -69,6 +76,7 @@ def _parse_matrix_from(lines: list[str], start_idx: int
         if not m:
             return None
         label, rest = m.group(1), m.group(2)
+        # 先頭トークンが純数字ならラベルではない
         if re.fullmatch(r"\d+", label):
             return None
         floats = _FLOAT_RE.findall(rest)
@@ -77,11 +85,11 @@ def _parse_matrix_from(lines: list[str], start_idx: int
             return label, vals
         return None
 
-    # 見出し直後から「列ヘッダ（整数）」または「eig ヘッダ」を探索
+    # 見出し直後から「整数列ヘッダ」または「eig ヘッダ」を探す
     k = start_idx
-    header_mode: Optional[str] = None  # "intcols" or "eig"
-    pending_cols: Optional[List[int]] = None
-    pending_eig_block: Optional[List[float]] = None
+    header_mode = None  # "intcols" or "eig"
+    pending_cols = None
+    pending_eigs = None
 
     while k < len(lines):
         if _looks_like_section_end(lines[k]):
@@ -92,11 +100,12 @@ def _parse_matrix_from(lines: list[str], start_idx: int
             pending_cols = cols
             k += 1
             break
-        eig_block = _parse_eig_values_from_line(lines[k])
-        if eig_block:
+        eigs_block = _parse_eig_values_from_line(lines[k])
+        if eigs_block:
             header_mode = "eig"
-            pending_eig_block = eig_block
+            pending_eigs = eigs_block
             k += 1
+            # 区切り線があれば消費
             if k < len(lines) and re.match(r"^\s*[-=]{3,}\s*$", lines[k]):
                 k += 1
             break
@@ -105,7 +114,7 @@ def _parse_matrix_from(lines: list[str], start_idx: int
     if header_mode is None:
         raise RuntimeError("No matrix header found (neither integer columns nor eig header).")
 
-    # ---- A) 整数列ヘッダモード（通常のブロック表示） ----
+    # ---------------- A) 整数列ヘッダモード ----------------
     if header_mode == "intcols":
         data_num: dict[tuple[int, int], float] = {}
         row_min = None
@@ -114,14 +123,13 @@ def _parse_matrix_from(lines: list[str], start_idx: int
         col_max = None
         captured = False
 
+        # ラベル対応（必要になったらONにする）
         ao_labels: Optional[List[str]] = None
         label_to_row: dict[str, int] = {}
-        expected_row_idx: Optional[int] = None  # 各ブロック先頭で 0 にリセットして順序を厳密検証
+        expected_row_idx: Optional[int] = None
+        label_mode: Optional[bool] = None  # 最初のデータ行で True(ラベル) / False(数値) に固定
 
-        current_cols: Optional[List[int]] = pending_cols
-        # ブロック開始時に順序検証を有効化
-        if current_cols is not None:
-            expected_row_idx = 0
+        current_cols = pending_cols
 
         while k < len(lines):
             line = lines[k]
@@ -129,19 +137,39 @@ def _parse_matrix_from(lines: list[str], start_idx: int
             # 次ブロックの列ヘッダ？
             new_cols = _is_int_columns(line)
             if new_cols is not None:
-                # 直前ブロックがラベル行を含んでいたら、全行数を満たしたかをチェック
-                if ao_labels is not None and expected_row_idx is not None and expected_row_idx != len(ao_labels):
-                    raise RuntimeError("AO label list mismatch across blocks (row count differs).")
+                # ブロック切替時の検証（ラベルモード時は行数が揃っているか）
+                if label_mode is True and ao_labels is not None and expected_row_idx is not None:
+                    if expected_row_idx != len(ao_labels):
+                        raise RuntimeError("AO label list mismatch across blocks (row count differs).")
                 current_cols = new_cols
-                expected_row_idx = 0  # 新ブロック開始：順序検証をリセット
+                # 列範囲更新
                 col_min = min(new_cols) if col_min is None else min(col_min, min(new_cols))
                 col_max = max(new_cols) if col_max is None else max(col_max, max(new_cols))
+                # 新ブロック開始
+                expected_row_idx = 0 if label_mode else None
                 k += 1
                 continue
 
             if current_cols is not None:
+                # まず“現在のモード”に従ってパース（未確定なら数値優先→失敗ならラベル）
+                parsed_num = None
+                parsed_lab = None
+
+                if label_mode is not True:
+                    parsed_num = _try_parse_numeric_row(line, ncols=len(current_cols))
+                    if parsed_num is not None and label_mode is None:
+                        label_mode = False  # 最初のデータで固定
+                        expected_row_idx = None
+
+                if parsed_num is None and label_mode is not False:
+                    parsed_lab = _try_parse_labeled_row(line, ncols=len(current_cols))
+                    if parsed_lab is not None and label_mode is None:
+                        label_mode = True
+                        ao_labels = []
+                        label_to_row = {}
+                        expected_row_idx = 0
+
                 # 数値行
-                parsed_num = _try_parse_numeric_row(line, ncols=len(current_cols))
                 if parsed_num is not None:
                     row, vals = parsed_num
                     row_min = row if row_min is None else min(row_min, row)
@@ -158,39 +186,29 @@ def _parse_matrix_from(lines: list[str], start_idx: int
                     continue
 
                 # ラベル行
-                parsed_lab = _try_parse_labeled_row(line, ncols=len(current_cols))
                 if parsed_lab is not None:
                     label, vals = parsed_lab
-                    if ao_labels is None:
-                        # 初回ブロックで固定
-                        ao_labels = []
-                        label_to_row = {}
-                        expected_row_idx = 0
-
-                    # 以降のブロックでは順序を厳密チェック
-                    if label not in label_to_row:
-                        if expected_row_idx is None or expected_row_idx != len(ao_labels):
-                            # 初回構築中以外に未知ラベルが出た → 不一致
-                            raise RuntimeError("AO label list mismatch across blocks (unknown label).")
-                        # 初回構築中（最初のブロック）だけ追加を許可
-                        label_to_row[label] = len(ao_labels)
-                        ao_labels.append(label)
+                    assert label_mode is True
+                    assert ao_labels is not None
 
                     if expected_row_idx is None:
                         expected_row_idx = 0
-                    # 順序チェック
-                    if label != ao_labels[expected_row_idx]:
-                        raise RuntimeError("AO label list mismatch across blocks (order differs).")
-                    row = label_to_row[label]
-                    expected_row_idx += 1
+                    if label not in label_to_row:
+                        if expected_row_idx != len(ao_labels):
+                            # 途中で未知ラベルが出現 → 不一致
+                            raise RuntimeError("AO label list mismatch across blocks (unknown label).")
+                        label_to_row[label] = len(ao_labels)
+                        ao_labels.append(label)
 
-                    if col_min is None:
-                        col_min, col_max = min(current_cols), max(current_cols)
-                    else:
-                        col_min = min(col_min, min(current_cols))
-                        col_max = max(col_max, max(current_cols))
+                    # 順序チェック
+                    if expected_row_idx >= len(ao_labels) or label != ao_labels[expected_row_idx]:
+                        raise RuntimeError("AO label list mismatch across blocks (order differs).")
+
+                    rowid = label_to_row[label]
                     for j, c in enumerate(current_cols):
-                        data_num[(row, c)] = vals[j]
+                        data_num[(rowid, c)] = vals[j]
+
+                    expected_row_idx += 1
                     captured = True
                     k += 1
                     continue
@@ -205,26 +223,33 @@ def _parse_matrix_from(lines: list[str], start_idx: int
                 k += 1
                 break
 
-            # その他に遭遇：何か取れていればブロック終了
+            # ここに来た非空行はデータでない
+            # 既に何か取れていればブロック終了
             if captured:
                 break
+            # まだ何も取れていない場合は次の行へ（ノイズ行を飛ばす）
             k += 1
 
-        if ao_labels is not None and expected_row_idx is not None and expected_row_idx != len(ao_labels):
-            raise RuntimeError("AO label list mismatch across blocks (row count differs at end).")
+        # ブロック末尾の検証
+        if label_mode is True and ao_labels is not None and expected_row_idx is not None:
+            if expected_row_idx != len(ao_labels):
+                raise RuntimeError("AO label list mismatch across blocks (row count differs at end).")
 
         if not data_num:
             raise RuntimeError("No matrix data captured.")
 
-        if ao_labels is not None:
+        # 出力配列を構築
+        if label_mode is True and ao_labels is not None:
             nrows = len(ao_labels)
             assert col_min is not None and col_max is not None
             ncols = col_max - col_min + 1
             M = np.zeros((nrows, ncols), dtype=float)
             for (r, c), v in data_num.items():
+                # ラベル行の r は 0 起点の内部インデックス
                 M[r, c - col_min] = v
             return M, k, None, ao_labels
 
+        # 数値行モード
         assert row_min is not None and row_max is not None
         assert col_min is not None and col_max is not None
         nrows = row_max - row_min + 1
@@ -234,58 +259,47 @@ def _parse_matrix_from(lines: list[str], start_idx: int
             M[r - row_min, c - col_min] = v
         return M, k, None, None
 
-    # ---- B) eig ヘッダモード（固有値・固有ベクトル：横連結） ----
-    eig_all: List[float] = []
+    # ---------------- B) eig ヘッダモード（横連結） ----------------
+    eigs_all: List[float] = []
     ao_labels: Optional[List[str]] = None
     label_to_row: dict[str, int] = {}
     data_eig: dict[tuple[int, int], float] = {}
     col_offset = 0
 
-    current_eig = pending_eig_block
-    while current_eig:
-        ne = len(current_eig)
-        eig_all.extend(current_eig)
-
-        # セパレータが残っていれば消費済み（上で対応）
-        expected_row_idx = 0  # 各 eig ブロックで 0 から順序チェック
+    current_eigs = pending_eigs
+    while current_eigs:
+        ne = len(current_eigs)
+        eigs_all.extend(current_eigs)
+        expected_row_idx = 0
 
         while k < len(lines):
             line = lines[k]
 
-            # 空行は**終端にしない**（次の eig を探すためスキップ）
             if not line.strip():
                 k += 1
                 continue
 
             # 次の eig ヘッダ？
-            next_eig = _parse_eig_values_from_line(line)
-            if next_eig:
-                # 今のブロックがラベル完全列挙だったか検証
-                if ao_labels is None:
-                    raise RuntimeError("Eigenvector block malformed (labels not found).")
-                if expected_row_idx != len(ao_labels):
-                    raise RuntimeError("AO label list mismatch across eig blocks (row count differs).")
-                # 次ブロックへ
+            next_eigs = _parse_eig_values_from_line(line)
+            if next_eigs:
+                if ao_labels is None or expected_row_idx != len(ao_labels):
+                    raise RuntimeError("AO label list mismatch or missing rows before next eig header.")
                 k += 1
                 if k < len(lines) and re.match(r"^\s*[-=]{3,}\s*$", lines[k]):
                     k += 1
                 col_offset += ne
-                current_eig = next_eig
+                current_eigs = next_eigs
                 break
 
-            # セクション終端
             if _looks_like_section_end(line):
-                # 今のブロックがラベル完全列挙だったか検証
                 if ao_labels is None or expected_row_idx != len(ao_labels):
                     raise RuntimeError("AO label list mismatch or missing rows before section end.")
-                current_eig = None
+                current_eigs = None
                 k += 1
                 break
 
-            # ラベル行（固有ベクトルはラベル必須とみなす）
             parsed = _try_parse_labeled_row(line, ncols=ne)
             if parsed is None:
-                # 不明行：もし既に何か取れていればブロック終了扱い
                 raise RuntimeError("Unexpected line inside eigenvector block.")
             label, vals = parsed
 
@@ -295,14 +309,11 @@ def _parse_matrix_from(lines: list[str], start_idx: int
 
             if label not in label_to_row:
                 if len(ao_labels) != expected_row_idx:
-                    # 途中で未知ラベルが現れた → 不一致
                     raise RuntimeError("AO label list mismatch across eig blocks (unknown label).")
-                # 初回ブロック構築時のみ追加を許可
                 label_to_row[label] = len(ao_labels)
                 ao_labels.append(label)
 
-            # 順序チェック
-            if label != ao_labels[expected_row_idx]:
+            if expected_row_idx >= len(ao_labels) or label != ao_labels[expected_row_idx]:
                 raise RuntimeError("AO label list mismatch across eig blocks (order differs).")
 
             rowid = label_to_row[label]
@@ -311,18 +322,16 @@ def _parse_matrix_from(lines: list[str], start_idx: int
 
             expected_row_idx += 1
             k += 1
-
         else:
-            # while k < len(lines) が自然終了 → 現ブロック終了
             if ao_labels is None or expected_row_idx != len(ao_labels):
                 raise RuntimeError("AO label list mismatch or missing rows at EOF.")
-            current_eig = None
+            current_eigs = None
 
     if not data_eig:
         raise RuntimeError("No eigenvector data captured after eig header.")
 
     nrows = len(ao_labels) if ao_labels is not None else 0
-    ncols = len(eig_all)
+    ncols = len(eigs_all)
     if nrows == 0 or ncols == 0:
         raise RuntimeError("Eigenvector block malformed (no labels or no eigenvalues).")
 
@@ -330,7 +339,8 @@ def _parse_matrix_from(lines: list[str], start_idx: int
     for (r, c), v in data_eig.items():
         M[r, c] = v
 
-    return M, k, eig_all, ao_labels
+    return M, k, eigs_all, ao_labels
+
 
 def getmat(out_path: str, string: str, all: bool = False
            ) -> Union[List[np.ndarray], Optional[np.ndarray]]:
