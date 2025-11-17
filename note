@@ -1,0 +1,5 @@
+rm -rf dist build *.egg-info
+python3.9 -m pip install -U build twine
+python3.9 -m build
+python3.9 -m twine check dist/*
+python3.9 -m twine upload dist/*
