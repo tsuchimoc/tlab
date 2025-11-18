@@ -2,7 +2,7 @@ import numpy as np
 from .matrix import printmat, MatBlock
 from .linalg import symm, Lowdin_orthonormalization
 
-def davidson(H=None, S=None, Hc=None, *, nroots=1, diag=None, init_guess=None, threshold=1e-5, maxiter=100, verbose=0, shift_operator=None):
+def davidson(H, S=None, *, nroots=1, diag=None, Sdiag=None, init_guess=None, threshold=1e-5, maxiter=100, verbose=0, shift_operator=None):
     """
     Solve the (generalized) eigenvalue problem using the Davidson algorithm:
 
@@ -11,19 +11,18 @@ def davidson(H=None, S=None, Hc=None, *, nroots=1, diag=None, init_guess=None, t
 
     Parameters
     ----------
-    H : (N, N) ndarray or LinearOperator
+    H : (N, N) ndarray or callable function to compute sigma-vectors H(c) = H@c
         Hamiltonian (or coefficient) matrix.
-    S : (N, N) ndarray or LinearOperator, optional
+    S : (N, N) ndarray or callable function to compute sigma-vectors S(c) = S@c, optional
         Overlap matrix. If None, the standard eigenproblem H c = E c is solved.
-    Hc : Function 
-        Function to provide a sigma-vector H@c
-    NDim : int, optioinal
-        Dimension of H
     nroots : int, optional
         Number of lowest eigenpairs to compute (default: 1).
     diag : (N,) ndarray, optional
         Precomputed diagonal elements of H (used as preconditioner).
         If None, they are extracted from H.
+    Sdiag : (N,) ndarray, optional
+        Precomputed diagonal elements of S (used as preconditioner).
+        If None, they are extracted from S.
     init_guess : (N, k) ndarray, optional
         Initial guess vectors for the subspace (columns). If None, random
         or canonical basis vectors are used.
@@ -34,6 +33,7 @@ def davidson(H=None, S=None, Hc=None, *, nroots=1, diag=None, init_guess=None, t
     verbose : int, optional
         Verbosity level. If >0, residual norms and eigenvalues are printed
         during the iterations.
+    shift_operator : 
 
     Returns
     -------
@@ -49,49 +49,85 @@ def davidson(H=None, S=None, Hc=None, *, nroots=1, diag=None, init_guess=None, t
         r = H c - E S c
       and convergence is achieved when ||r|| < threshold.
     - For large sparse problems, `H` and `S` may be provided as
-      `scipy.sparse.linalg.LinearOperator` to avoid explicit matrix storage.
+      `callable` function to avoid explicit matrix storage.
     - If the overlap matrix S is supplied, it should be symmetric positive-definite.
     """
     
-    if (H is not None):
-        print('Dimension of H:',H.shape)
-        if H.shape[0] != H.shape[1]:
-            raise TypeError("H is not a square matrix.")
-        if np.linalg.norm(H-H.T) > 1e-8:
+    if isinstance(H, np.ndarray):
+        H_mat = H
+        print('Found full matrix H')
+        if H_mat.shape[0] != H_mat.shape[1]:
+            raise TypeError(f"H({H_mat.shape[0]}, {H_mat.shape[1]}) is not a square matrix.")
+        if np.linalg.norm(H_mat - H_mat.T) > 1e-8:
             raise TypeError("H is not a symmetric matrix.")
-        NDim = H.shape[0]
-        direct = False
-    elif (Hc is not None):
-        if (diag is None):
-            raise Exception("diag has to be defined when Hc is given.")
-        NDim = len(diag)
-        direct = True
-    else:
-        raise Exception("Neither H nor Hc was provided.")
-    if S is not None:
-        print('Dimension of S:',S.shape)
-        if S.shape[0] != S.shape[1]:
-            raise TypeError("S is not a square matrix.")
-        if np.linalg.norm(S-S.T) > 1e-8:
-            raise TypeError("S is not a symmetric matrix.")
+        NDim = H_mat.shape[0]
 
+        def H_op(c):
+            return H_mat @ c
+
+    elif callable(H):
+        print('Direct Davidson')
+        H_mat = None
+        if diag is None:
+            raise Exception("diag has to be defined when H is given as a callable.")
+        NDim = len(diag)
+
+        # H 自体が H(c) を返す演算子であるとみなす
+        H_op = H
+
+    else:
+        raise TypeError("H must be either a numpy array or a callable(c)->Hc.")
+
+    print('Dimension of H:', NDim)
+
+    # --- S の扱いを統一 ---
     if S is None:
-        S = np.diag(np.ones(NDim))
+        S_mat = None
+        Sdiag_list = np.ones(NDim, float)
+        def S_op(c):
+            # 単位行列として働く
+            return c
+
+    elif isinstance(S, np.ndarray):
+        S_mat = S
+        print('Dimension of S:', S_mat.shape)
+        if S_mat.shape[0] != S_mat.shape[1]:
+            raise TypeError("S is not a square matrix.")
+        if np.linalg.norm(S_mat - S_mat.T) > 1e-8:
+            raise TypeError("S is not a symmetric matrix.")
+        if S_mat.shape[0] != NDim:
+            raise TypeError("Dimensions of H and S do not match.")
+        Sdiag_list = np.diag(S)
+
+        def S_op(c):
+            return S_mat @ c
+
+    elif callable(S):
+        S_mat = None
+        if Sdiag is None:
+            raise Exception("Sdiag has to be defined when S is given as a callable.")
+        if NDim != len(Sdiag):
+            raise TypeError("Dimensions of H and S do not match.")
+        Sdiag_list = Sdiag
+
+        # S 自体が S(c) を返す演算子
+        S_op = S
+    else:
+        raise TypeError("S must be None, a numpy array, or a callable(c)->Sc.")
+
+#    if S is None:
+#        S = np.diag(np.ones(NDim))
         
     if diag is None:
         Hdiag_list = np.diag(H)
     else:
         Hdiag_list = diag
-    Sdiag_list = np.diag(S)
-    Hsub = np.zeros(0, float)
     Ssub = np.zeros(0, float)
     norms = np.zeros(nroots)
     converge = [False for x in range(nroots)]
     Hstates = []
     Sstates = []
     icyc = 0
-    vec = np.zeros((nroots, NDim), float)
-    Hvec = np.zeros((nroots, NDim), float)
     new_state = np.zeros(NDim, float)
     ioff = 0
     
@@ -103,262 +139,22 @@ def davidson(H=None, S=None, Hc=None, *, nroots=1, diag=None, init_guess=None, t
         min_result = nsmallest(nroots, result)
         
         states = []
-        print("Initial guess estimated as: ", end='')
+        if verbose>=0:
+            print("Initial guess estimated as: ", end='')
         for k in range(nroots):
-            print(f"{min_result[k][1]}", end='')
+            if verbose>=0:
+                print(f"{min_result[k][1]}", end='')
             v = np.zeros(NDim, float)
             v[min_result[k][1]] = 1
             states.append(v)
-            if k != nroots-1:
-                print(', ',end='')
-            else:
-                print('')
-    else:
-        states = init_guess
-    ## Orthogonalize
-    for i in range(len(states)):
-        Sstates.append(S@states[i])
-    for i in range(len(states)):
-        for j in range(i+1):
-            Sij = states[j] @ Sstates[i]
-            Ssub = np.append(Ssub, Sij)
-        
-        Ssub_symm = symm(Ssub)
-    X = Lowdin_orthonormalization(Ssub_symm, thres=1e-6)
-     
-    for i in range(len(states)):
-        vec[i] *= 0
-        for j in range(X.shape[0]):
-            vec[i] += states[j] * X[j, i]
-    states = list(vec.copy())
-        
-    #printmat(np.array(states).T, 'orthogonalized states')
-    Sstates = []
-    Ssub *= 0 
-    nroots_ = len(states)
-    print('Cycle  State       Energy      Grad')
-    while icyc < maxiter:
-        ### Subspace Hamiltonian
-        ntargets = len(states) - len(Hstates) 
-        len_states = len(states)
-        for i in range(ioff, ioff+ntargets):
-            if verbose:
-                printmat(states[i], 'Trial vector')
-            if (direct):
-                Hstates.append(Hc(states[i]))
-            else:
-                Hstates.append(H@states[i])
-            Sstates.append(S@states[i])
-            for j in range(i+1):
-                Hij = states[j] @ Hstates[i]
-                Hsub = np.append(Hsub, Hij)
-                Sij = states[j] @ Sstates[i]
-                Ssub = np.append(Ssub, Sij)
-
-        Hsub_symm = symm(Hsub)
-        Ssub_symm = symm(Ssub)
-        #printmat(Hsub_symm, 'HSub')
-        E, V = np.linalg.eigh(Hsub_symm)
-        #printmat(V, eig=E, mmax=5)
-        if verbose:
-            printmat(Hsub_symm)
-            printmat(V, eig=E)
-        reset = False 
-        for i in range(min(nroots, len_states)):
-            vec[i] *= 0
-            Hvec[i] *= 0
-            for j in range(V.shape[0]):
-                vec[i] += states[j] * V[j, i]
-                Hvec[i] += Hstates[j] * V[j, i] 
-            residual = Hvec[i] - E[i] * S@vec[i]
-            if verbose:
-                printmat(residual, 'Residual vector')
-            #print('state',i)
-            #printmat(Hvec.T, 'AX vector')
-            #printmat(residual, 'Residual vector')
-            norms[i] = np.linalg.norm(residual)
-            #norms[i] = np.sqrt(residual.T@S@residual)
-            if norms[i] < threshold:
-                converge[i] = True
-            else:
-                converge[i] = False
-                new_state *= 0 
-                for k in range(NDim):
-                    #if abs(Hdiag_list[k] - E[i] *Sdiag_list[k])   > 1e-6 and Sdiag_list[k]>:
-                    if abs(Hdiag_list[k] - E[i] *Sdiag_list[k])   > 1e-8:
-                        new_state[k] = - residual[k] / (Hdiag_list[k] - E[i]*Sdiag_list[k])
-                        if verbose:
-                            print(f"{k}  {residual[k]:16.10f}, {Hdiag_list[k] - E[i]*Sdiag_list[k]:16.10f}")
-                    else:
-                        # Changed 1e14 to 1e4 (just perturb a little bit...)
-                        new_state[k] = - residual[k] / 1e4
-                #printmat(new_state,'new_state (unorthonormal')
-                # Gram-Schmidt orthogonalization
-                state = new_state.copy()
-                Sstate = S@state
-                norm2 = np.sqrt(state.T@Sstate)
-                #X = (np.array(states)).T
-                #printmat(X.T@S@X)
-                state /= norm2
-                if norm2 < 1e-6:
-                    reset = True
-                for old_state in states:
-                    state -= old_state * (old_state @ S @ state)
-                    #norm2 = np.linalg.norm(state)
-                    norm2 = np.sqrt(state.T@S@state)
-                    #state.normalize(norm2)
-                if norm2 < 1e-6:
-                        ### This means the new vector is spanned by other vectors in the subspace. 
-                        ### Skip this state.
-                        break
-                else:
-                    norm2 = np.sqrt(state.T@S@state)
-                    state /= norm2
-                    #print(state.T@S@state)
-                    states.append(state)
-                    for old_state in states[:min(len_states, nroots)]:
-                        #print_state(old_state)
-                        if abs(old_state @ state) > 1e-8:
-                            reset = True
-                        #print(abs(old_state @ state))
-                if verbose:
-                    printmat(state, 'Updated vector (orthogonal)')
-                #printmat(state, 'Updated vector (orthogonal)')
-        # Project out the range space
-        s = np.zeros((len(states), len(states)))
-        for j in range(len(states)):
-            for i in range(len(states)):
-                s[j,i] = (states[j] @ states[i]).real
-        #printmat(s)
-        if True:
-                
-            print(f'[{icyc:2d}]      0:  {E[0]:+.10f}   {norms[0]:.2e}  ', end='')
-            if converge[0]:
-                print('converged')
-            else:
-                print('')
-            for k in range(1, min(nroots, len_states)):
-                print(f'          {k}:  {E[k]:+.10f}   {norms[k]:.2e}  ', end='')
-                if converge[k]:
-                    print('converged')
+            if verbose>=0:
+                if k != nroots-1:
+                    print(', ',end='')
                 else:
                     print('')
-        if all (converge): 
-            break
-        if len(states) <= nroots and all (converge[:len(states)]):
-            if verbose >= 0:
-                print(f'{len(states)} states converged.')
-                print(f'Rest {nroots - len(states)} states not found.')
-            nroots = len(states)
-            converge = converge[:len(states)]
-            break
-
-        ioff += ntargets
-        icyc += 1
-    result = MatBlock(M=vec.T, eig=E, ao_labels=None)
-    return result
-
-#def davidson(H, S=None, *, nroots=1, diag=None, init_guess=None, threshold=1e-5, maxiter=100, verbose=0, shift_operator=None):
-#    """
-#    Solve the (generalized) eigenvalue problem using the Davidson algorithm:
-#
-#        H c = E c
-#        (or H c = E S c if S is given)
-#
-#    Parameters
-#    ----------
-#    H : (N, N) ndarray or LinearOperator
-#        Hamiltonian (or coefficient) matrix.
-#    S : (N, N) ndarray or LinearOperator, optional
-#        Overlap matrix. If None, the standard eigenproblem H c = E c is solved.
-#    nroots : int, optional
-#        Number of lowest eigenpairs to compute (default: 1).
-#    diag : (N,) ndarray, optional
-#        Precomputed diagonal elements of H (used as preconditioner).
-#        If None, they are extracted from H.
-#    init_guess : (N, k) ndarray, optional
-#        Initial guess vectors for the subspace (columns). If None, random
-#        or canonical basis vectors are used.
-#    threshold : float, optional
-#        Convergence tolerance on the residual norm (default: 1e-5).
-#    maxiter : int, optional
-#        Maximum number of Davidson iterations (default: 100).
-#    verbose : int, optional
-#        Verbosity level. If >0, residual norms and eigenvalues are printed
-#        during the iterations.
-#
-#    Returns
-#    -------
-#    MatBlock
-#        Result object with attribute .M containing the eigenvectors 
-#        and attirbute .eig containing the eigenvalues.
-#
-#    Notes
-#    -----
-#    - The Davidson method builds a Krylov-like subspace iteratively and
-#      accelerates convergence using diagonal preconditioning.
-#    - The residual for an approximate eigenpair (E, c) is
-#        r = H c - E S c
-#      and convergence is achieved when ||r|| < threshold.
-#    - For large sparse problems, `H` and `S` may be provided as
-#      `scipy.sparse.linalg.LinearOperator` to avoid explicit matrix storage.
-#    - If the overlap matrix S is supplied, it should be symmetric positive-definite.
-#    """
-#
-#    print('Dimension of H:',H.shape)
-#    
-#    if H.shape[0] != H.shape[1]:
-#        raise TypeError("H is not a square matrix.")
-#    if np.linalg.norm(H-H.T) > 1e-8:
-#        raise TypeError("H is not a symmetric matrix.")
-#    if S is not None:
-#        print('Dimension of S:',S.shape)
-#        if S.shape[0] != S.shape[1]:
-#            raise TypeError("S is not a square matrix.")
-#        if np.linalg.norm(S-S.T) > 1e-8:
-#            raise TypeError("S is not a symmetric matrix.")
-#
-#    NDim = H.shape[0]
-#    if S is None:
-#        S = np.diag(np.ones(NDim))
-#        
-#    if diag is None:
-#        Hdiag_list = np.diag(H)
 #    else:
-#        Hdiag_list = diag
-#    Sdiag_list = np.diag(S)
-#    Hsub = np.zeros(0, float)
-#    Ssub = np.zeros(0, float)
-#    norms = np.zeros(nroots)
-#    converge = [False for x in range(nroots)]
-#    Hstates = []
-#    Sstates = []
-#    icyc = 0
-#    vec = np.zeros((nroots, NDim), float)
-#    Hvec = np.zeros((nroots, NDim), float)
-#    new_state = np.zeros(NDim, float)
-#    ioff = 0
-#    
-#    if init_guess is None:
-#        ### Find the nroots lowest diagonals
-#        ### Get lowest nroots states according to the diagonals
-#        from heapq import nsmallest
-#        result = [(value, k) for k, value in enumerate(Hdiag_list)]
-#        min_result = nsmallest(nroots, result)
-#        
-#        states = []
-#        print("Initial guess estimated as: ", end='')
-#        for k in range(nroots):
-#            print(f"{min_result[k][1]}", end='')
-#            v = np.zeros(NDim, float)
-#            v[min_result[k][1]] = 1
-#            states.append(v)
-#            if k != nroots-1:
-#                print(', ',end='')
-#            else:
-#                print('')
-#    else:
-#        states = init_guess
+#        states = _normalize_init_guess(init_guess, NDim)
+#    print(states)
 #    ## Orthogonalize
 #    for i in range(len(states)):
 #        Sstates.append(S@states[i])
@@ -375,133 +171,249 @@ def davidson(H=None, S=None, Hc=None, *, nroots=1, diag=None, init_guess=None, t
 #        for j in range(X.shape[0]):
 #            vec[i] += states[j] * X[j, i]
 #    states = list(vec.copy())
-#        
-#    #printmat(np.array(states).T, 'orthogonalized states')
-#    Sstates = []
-#    Ssub *= 0 
-#    nroots_ = len(states)
-#    print('Cycle  State       Energy      Grad')
-#    while icyc < maxiter:
-#        ### Subspace Hamiltonian
-#        ntargets = len(states) - len(Hstates) 
-#        len_states = len(states)
-#        for i in range(ioff, ioff+ntargets):
-#            if verbose:
-#                printmat(states[i], 'Trial vector')
-#            Hstates.append(H@states[i])
-#            Sstates.append(S@states[i])
-#            for j in range(i+1):
-#                Hij = states[j] @ Hstates[i]
-#                Hsub = np.append(Hsub, Hij)
-#                Sij = states[j] @ Sstates[i]
-#                Ssub = np.append(Ssub, Sij)
-#
-#        Hsub_symm = symm(Hsub)
-#        Ssub_symm = symm(Ssub)
-#        #printmat(Hsub_symm, 'HSub')
-#        E, V = np.linalg.eigh(Hsub_symm)
-#        #printmat(V, eig=E, mmax=5)
-#        if verbose:
-#            printmat(Hsub_symm)
-#            printmat(V, eig=E)
-#        reset = False 
-#        for i in range(min(nroots, len_states)):
-#            vec[i] *= 0
-#            Hvec[i] *= 0
-#            for j in range(V.shape[0]):
-#                vec[i] += states[j] * V[j, i]
-#                Hvec[i] += Hstates[j] * V[j, i] 
-#            residual = Hvec[i] - E[i] * S@vec[i]
-#            if verbose:
-#                printmat(residual, 'Residual vector')
-#            #print('state',i)
-#            #printmat(Hvec.T, 'AX vector')
-#            #printmat(residual, 'Residual vector')
-#            norms[i] = np.linalg.norm(residual)
-#            #norms[i] = np.sqrt(residual.T@S@residual)
-#            if norms[i] < threshold:
-#                converge[i] = True
-#            else:
-#                converge[i] = False
-#                new_state *= 0 
-#                for k in range(NDim):
-#                    #if abs(Hdiag_list[k] - E[i] *Sdiag_list[k])   > 1e-6 and Sdiag_list[k]>:
-#                    if abs(Hdiag_list[k] - E[i] *Sdiag_list[k])   > 1e-8:
-#                        new_state[k] = - residual[k] / (Hdiag_list[k] - E[i]*Sdiag_list[k])
-#                        if verbose:
-#                            print(f"{k}  {residual[k]:16.10f}, {Hdiag_list[k] - E[i]*Sdiag_list[k]:16.10f}")
-#                    else:
-#                        # Changed 1e14 to 1e4 (just perturb a little bit...)
-#                        new_state[k] = - residual[k] / 1e4
-#                #printmat(new_state,'new_state (unorthonormal')
-#                # Gram-Schmidt orthogonalization
-#                state = new_state.copy()
-#                Sstate = S@state
-#                norm2 = np.sqrt(state.T@Sstate)
-#                #X = (np.array(states)).T
-#                #printmat(X.T@S@X)
-#                state /= norm2
-#                if norm2 < 1e-6:
-#                    reset = True
-#                for old_state in states:
-#                    state -= old_state * (old_state @ S @ state)
-#                    #norm2 = np.linalg.norm(state)
-#                    norm2 = np.sqrt(state.T@S@state)
-#                    #state.normalize(norm2)
-#                if norm2 < 1e-6:
-#                        ### This means the new vector is spanned by other vectors in the subspace. 
-#                        ### Skip this state.
-#                        break
-#                else:
-#                    norm2 = np.sqrt(state.T@S@state)
-#                    state /= norm2
-#                    #print(state.T@S@state)
-#                    states.append(state)
-#                    for old_state in states[:min(len_states, nroots)]:
-#                        #print_state(old_state)
-#                        if abs(old_state @ state) > 1e-8:
-#                            reset = True
-#                        #print(abs(old_state @ state))
-#                if verbose:
-#                    printmat(state, 'Updated vector (orthogonal)')
-#                #printmat(state, 'Updated vector (orthogonal)')
-#        # Project out the range space
-#        s = np.zeros((len(states), len(states)))
-#        for j in range(len(states)):
-#            for i in range(len(states)):
-#                s[j,i] = (states[j] @ states[i]).real
-#        #printmat(s)
-#        if True:
-#                
-#            print(f'[{icyc:2d}]      0:  {E[0]:+.10f}   {norms[0]:.2e}  ', end='')
-#            if converge[0]:
-#                print('converged')
-#            else:
-#                print('')
-#            for k in range(1, min(nroots, len_states)):
-#                print(f'          {k}:  {E[k]:+.10f}   {norms[k]:.2e}  ', end='')
-#                if converge[k]:
-#                    print('converged')
-#                else:
-#                    print('')
-#        if all (converge): 
-#            break
-#        if len(states) <= nroots and all (converge[:len(states)]):
-#            if verbose >= 0:
-#                print(f'{len(states)} states converged.')
-#                print(f'Rest {nroots - len(states)} states not found.')
-#            nroots = len(states)
-#            converge = converge[:len(states)]
-#            break
-#
-#        ioff += ntargets
-#        icyc += 1
-#    result = MatBlock(M=vec.T, eig=E, ao_labels=None)
-#    return result
+    else:
+        states = _normalize_init_guess(init_guess, NDim)
+    
+    # states: list of np.ndarray, each shape=(NDim,)
+    
+    ## Orthogonalize
+    nvec = len(states)
+
+    vec = np.zeros((nvec, NDim), float)
+    Hvec = np.zeros((nvec, NDim), float)
+    
+    # Sstates = S @ state
+    Sstates = [S_op(v) for v in states] 
+    
+    # Ssub_ij = <state_i | S | state_j>
+    for i in range(nvec):
+        for j in range(i+1):
+            Sij = states[i] @ Sstates[j]
+            Ssub = np.append(Ssub, Sij)
+    
+    Ssub_symm = symm(Ssub)
+    
+    X = Lowdin_orthonormalization(Ssub_symm, thres=1e-6)
+    
+    # 直交化された線形結合を作る
+    for i in range(nvec):
+        # vec[i] = Σ_j states[j] * X[j,i]
+        vec[i] *= 0
+        for j in range(nvec):
+            vec[i] += states[j] * X[j, i]
+    
+    states = list(vec.copy()) 
+        
+    #printmat(np.array(states).T, 'orthogonalized states')
+    Sstates = []
+    Hsub = np.zeros(0, float)
+    Ssub = np.zeros(0, float)  
+    nroots_ = len(states)
+    if verbose >= 0:
+        print('Cycle    State       Energy        Grad')
+    while icyc < maxiter:
+        ### Subspace Hamiltonian
+        ntargets = len(states) - len(Hstates) 
+        len_states = len(states)
+        for i in range(ioff, ioff+ntargets):
+            if verbose >= 2:
+                printmat(states[i], 'Trial vector')
+            Hstates.append(H_op(states[i]))
+            Sstates.append(S_op(states[i]))
+            for j in range(i+1):
+                Hij = states[j] @ Hstates[i]
+                Hsub = np.append(Hsub, Hij)
+                Sij = states[j] @ Sstates[i]
+                Ssub = np.append(Ssub, Sij)
+
+        Hsub_symm = symm(Hsub)
+        Ssub_symm = symm(Ssub)
+        E, V = np.linalg.eigh(Hsub_symm)
+        if verbose >= 1:
+            printmat(Hsub_symm, title='Subspace Hamiltonian')
+            printmat(V, eig=E, title='Eigen-set')
+        reset = False 
+        for i in range(min(nroots, len_states)):
+            vec[i] *= 0
+            Hvec[i] *= 0
+            for j in range(V.shape[0]):
+                vec[i] += states[j] * V[j, i]
+                Hvec[i] += Hstates[j] * V[j, i] 
+            residual = Hvec[i] - E[i] * S_op(vec[i])
+            if verbose >= 2:
+                printmat(residual, 'Residual vector')
+            #print('state',i)
+            #printmat(Hvec.T, 'AX vector')
+            #printmat(residual, 'Residual vector')
+            norms[i] = np.linalg.norm(residual)
+            #norms[i] = np.sqrt(residual.T@S@residual)
+            if norms[i] < threshold:
+                converge[i] = True
+            else:
+                converge[i] = False
+                new_state *= 0 
+                for k in range(NDim):
+                    if abs(Hdiag_list[k] - E[i] *Sdiag_list[k])   > 1e-8:
+                        new_state[k] = - residual[k] / (Hdiag_list[k] - E[i]*Sdiag_list[k])
+                        if verbose >= 3:
+                            print(f"{k}  {residual[k]:16.10f}, {Hdiag_list[k] - E[i]*Sdiag_list[k]:16.10f}")
+                    else:
+                        # Changed 1e14 to 1e4 (just perturb a little bit...)
+                        new_state[k] = - residual[k] / 1e4
+                #printmat(new_state,'new_state (unorthonormal')
+                # Gram-Schmidt orthogonalization
+                state = new_state.copy()
+                Sstate = S_op(state)
+                norm2 = np.sqrt(state.T@Sstate)
+                #X = (np.array(states)).T
+                #printmat(X.T@S@X)
+                state /= norm2
+                if norm2 < 1e-6:
+                    reset = True
+                for old_state in states:
+                    state -= old_state * (old_state @ S_op(state))
+                    #norm2 = np.linalg.norm(state)
+                    norm2 = np.sqrt(state.T@S_op(state))
+                    #state.normalize(norm2)
+                if norm2 < 1e-6:
+                        ### This means the new vector is spanned by other vectors in the subspace. 
+                        ### Skip this state.
+                        break
+                else:
+                    norm2 = np.sqrt(state.T@S_op(state))
+                    state /= norm2
+                    #print(state.T@S@state)
+                    states.append(state)
+                    for old_state in states[:min(len_states, nroots)]:
+                        #print_state(old_state)
+                        if abs(old_state @ state) > 1e-8:
+                            reset = True
+                if verbose >= 2:
+                    printmat(state, 'Updated vector (orthogonal)')
+        #printmat(s)
+        if verbose >= 0:
+            print(f'[{icyc:3d}]        0:  {E[0]:+.10f}   {norms[0]:.2e}  ', end='')
+            if converge[0]:
+                print('converged')
+            else:
+                print('')
+            for k in range(1, min(nroots, len_states)):
+                print(f'          {k:4d}:  {E[k]:+.10f}   {norms[k]:.2e}  ', end='')
+                if converge[k]:
+                    print('converged')
+                else:
+                    print('')
+        if all (converge): 
+            print(f'\nAll {nroots} states converged.')
+            for k in range(nroots):
+                print(f'State {k:5d}:  {E[k]:+.10f}')
+            break
+        if len(states) <= nroots and all (converge[:len(states)]):
+            if verbose >= 0:
+                print(f'{len(states)} states converged.')
+                print(f'Rest {nroots - len(states)} states not found.')
+            nroots = len(states)
+            converge = converge[:len(states)]
+            break
+
+        ioff += ntargets
+        icyc += 1
+    nret = min(nroots, len(E))
+    result = MatBlock(M=vec[:nret].T, eig=E[:nret], ao_labels=None)
+    return result
+
+
+# ---- helpers ---------------------------------------------------------------
 
 import numpy as np
 
-# ---- helpers ---------------------------------------------------------------
+def _normalize_init_guess(init_guess, NDim: int):
+    """
+    init_guess を「list of np.ndarray(shape=(NDim,))」に正規化する。
+
+    受け付ける例:
+      - list:
+          各要素が 1 本のベクトル
+          ・(NDim,) の ndarray → そのまま
+          ・(NDim,1) や (1,NDim) など → flatten して (NDim,) に
+      - ndarray:
+          ・shape = (NDim,)       → 1 本 → [ (NDim,) ]
+          ・shape = (NDim, n)     → n 本 → 各列を (NDim,) に
+          ・shape = (n, NDim)     → n 本 → 各行を (NDim,) に
+      - それ以外:
+          np.asarray で ndarray 化できるなら ndarray のケースへ
+    """
+
+    def _to_vec1d(x):
+        """x を np.ndarray(shape=(NDim,)) に変換する小ヘルパー"""
+        arr = np.asarray(x, dtype=float)
+        if arr.ndim == 1:
+            if arr.size != NDim:
+                raise ValueError(
+                    f"init_guess element has size {arr.size}, expected {NDim}."
+                )
+            return arr.copy()
+        elif arr.ndim == 2:
+            if arr.size != NDim:
+                raise ValueError(
+                    f"init_guess element has shape {arr.shape}, "
+                    f"total size {arr.size}, expected {NDim}."
+                )
+            # (NDim,1) / (1,NDim) / その他 2次元だが要素数 NDim → フラットにして 1D
+            return arr.reshape(NDim,)
+        else:
+            raise ValueError(
+                f"init_guess element has ndim={arr.ndim}, cannot convert to 1D vector."
+            )
+
+    # --- 1) list の場合 ---
+    if isinstance(init_guess, list):
+        states = []
+        for v in init_guess:
+            states.append(_to_vec1d(v))
+        return states
+
+    # --- 2) ndarray の場合 ---
+    if isinstance(init_guess, np.ndarray):
+        arr = np.asarray(init_guess, dtype=float)
+
+        # (NDim,) → 1 本
+        if arr.ndim == 1:
+            if arr.size != NDim:
+                raise ValueError(
+                    f"init_guess has size {arr.size}, expected {NDim}."
+                )
+            return [arr.copy()]
+
+        # (NDim, n) → 列方向に n 本のベクトル
+        if arr.ndim == 2:
+            if arr.shape[0] == NDim:
+                n = arr.shape[1]
+                return [arr[:, i].copy() for i in range(n)]
+            # (n, NDim) → 行方向に n 本のベクトルとして解釈
+            if arr.shape[1] == NDim:
+                n = arr.shape[0]
+                return [arr[i, :].copy() for i in range(n)]
+            raise ValueError(
+                f"init_guess has shape {arr.shape}, "
+                f"cannot interpret as (NDim, n) or (n, NDim) with NDim={NDim}."
+            )
+
+        # それ以外
+        raise ValueError(
+            f"init_guess ndarray ndim={arr.ndim} not supported."
+        )
+
+    # --- 3) list でも ndarray でもない → ndarray 化を試みる ---
+    try:
+        arr = np.asarray(init_guess, dtype=float)
+    except Exception as e:
+        raise TypeError(
+            "init_guess must be list, ndarray, or convertible to ndarray."
+        ) from e
+
+    # ndarray として再処理（上の分岐に入る）
+    return _normalize_init_guess(arr, NDim)
 
 def _build_projector(Null, N):
     if Null is None:

@@ -477,29 +477,61 @@ def getmatgen(out_path: str, string: str, all: bool = False
         return results
 
 import sys
-def printmat(M: np.array, title: str = None, eig: np.array = None, mmax: int = 5, n: int = None, m: int = None, format: str = "12.7f", ao_labels: list = None,  file: str = None):
+from typing import Union
+
+def printmat(
+    M: Union[np.ndarray, MatBlock, list],
+    title: str = None,
+    eig: np.array = None,
+    mmax: int = 5,
+    n: int = None,
+    m: int = None,
+    format: str = "12.7f",
+    ao_labels: list = None,
+    file: str = None,
+):
     """Function:
     Print out A in a readable format.
 
         M         :  1D or 2D numpy array of dimension
-        eig       :  Given eigenvectros M[:,i], eig[i] are corresponding eigenvalues (ndarray or list)
+                     or MatBlock(M, eig, ao_labels)
+        eig       :  Given eigenvectors M[:,i], eig[i] are corresponding
+                     eigenvalues (ndarray or list).  MatBlock の場合、
+                     未指定なら MatBlock.eig を利用。
         file      :  file to be printed
-        mmax      :  maxixmum number of columns to print for each block
+        mmax      :  maximum number of columns to print for each block
         title     :  Name to be printed
         n,m       :  Need to be specified if M is a matrix,
                      but loaded as a 1D array
         format    :  Printing format
         ao_labels :  AO labels instead of integers for rows.
+                     MatBlock の場合、未指定なら MatBlock.ao_labels を利用。
 
     Author(s): Takashi Tsuchimochi
     """
+
+    # --- MatBlock の場合は中身を展開して eig / ao_labels を自動補完 ---
+    if isinstance(M, MatBlock):
+        blk = M
+        # ユーザが eig / ao_labels を明示的に指定していないときだけ MatBlock の値を使う
+        if eig is None and blk.eig is not None:
+            eig = blk.eig     # list でも np.ndarray でも可
+        if ao_labels is None and blk.ao_labels is not None:
+            ao_labels = blk.ao_labels
+        M = blk.M  # 以降は普通の行列として扱う
+
+    # --- 次元チェック ---
     if isinstance(M, list):
         dimension = 1
     elif isinstance(M, np.ndarray):
         dimension = M.ndim
+    else:
+        raise TypeError("M must be np.ndarray, list, or MatBlock.")
+
     if dimension == 0 or dimension > 2:
         error("Neither scalar nor tensor is printable with printmat.")
-    
+
+    # --- 出力先の設定 ---
     if file is None:
         file = sys.stdout
         should_close = False
@@ -509,107 +541,112 @@ def printmat(M: np.array, title: str = None, eig: np.array = None, mmax: int = 5
     else:
         raise TypeError("'file' should be None or str.")
 
-    if True:
-        if title is not None:
-            file.write(f" {title}\n")
+    # --- 本体 ---
+    if title is not None:
+        file.write(f" {title}\n")
 
-        if format.find('f') != -1:
-            ### Float
-            style = "f"
-            idx_f = format.find('f') 
-            idx = format.find('.')
-            digits = int(format[:idx]) 
-            decimal = int(format[idx+1:idx_f])
-        elif format.find('d') != -1:
-            style = "d"
-            idx = format.find('d')
-            digits = int(format[:idx])
-            decimal = '0'
-            format = format[:idx]+'.0f'
-        else:
-            raise TypeError(f'format={format} not supported in printmat.')
-        len_ = digits
-        if format[0] != ' ':
-            format = ' ' + format
-        if format.find('>') == -1:
-            format = '>' + format
-        if dimension == 2:
-            n, m = M.shape
-            imax = 0
-            while imax < m:
-                imin = imax + 1
-                imax = imax + mmax
-                if imax > m:
-                    imax = m
-                file.write('\n')
-                if ao_labels is not None:
-                    space_ao = " "*7
-                else:
-                    space_ao = ""
-                file.write(f"{space_ao}")#file=f)
+    if "f" in format:
+        # Float
+        style = "f"
+        idx_f = format.find("f")
+        idx = format.find(".")
+        digits = int(format[:idx])
+        decimal = int(format[idx + 1:idx_f])
+    elif "d" in format:
+        style = "d"
+        idx = format.find("d")
+        digits = int(format[:idx])
+        decimal = "0"
+        format = format[:idx] + ".0f"
+    else:
+        raise TypeError(f"format={format} not supported in printmat.")
+
+    len_ = digits
+    if format[0] != " ":
+        format = " " + format
+    if ">" not in format:
+        format = ">" + format
+
+    if dimension == 2:
+        n, m = M.shape
+        imax = 0
+        while imax < m:
+            imin = imax + 1
+            imax = imax + mmax
+            if imax > m:
+                imax = m
+            file.write("\n")
+            if ao_labels is not None:
+                space_ao = " " * 7
+            else:
+                space_ao = ""
+            file.write(f"{space_ao}")
+            if eig is None:
+                space = " " * 5
+                file.write(f"{space}")
+            else:
+                file.write(" eig |")
+
+            for i in range(imin - 1, imax):
                 if eig is None:
-                    space = " "*(5)
-                    file.write(f"{space}")#file=f)
+                    space = " " * (len_)
+                    file.write(f"{i:>{len_}d} ")
                 else:
-                    file.write(" eig |")#file=f)
-                    
-                for i in range(imin-1, imax):
-                    if eig is None:
-                        space = " "*(len_)
-                        file.write(f"{i:>{len_}d} ")#file=f)
-                    else:
-                        file.write(f"{eig[i]:{format}}|")
-                file.write('\n')
-                file.write(f"{space_ao}")
-                if eig is not None:
-                    hyphen = '-'*len_
-                    for i in range(imin-1, imax+1):
-                        file.write(f"{hyphen}")
+                    file.write(f"{eig[i]:{format}}|")
+            file.write("\n")
+            file.write(f"{space_ao}")
+            if eig is not None:
+                hyphen = "-" * len_
+                for i in range(imin - 1, imax + 1):
+                    file.write(f"{hyphen}")
+            else:
+                file.write(f"{space}")
+            file.write("\n")
+            for j in range(n):
+                if ao_labels is None:
+                    file.write(f" {j:4d} ")
                 else:
-                    file.write(f"{space}")
-                file.write('\n')
-                for j in range(n):
-                    if ao_labels is None:
-                        file.write(f" {j:4d} ")
-                    else:
-                        file.write(f" {ao_labels[j]:12s}")
-                    for i in range(imin-1, imax):
-                        file.write(f"{M[j][i]:{format}} ")
-                    file.write('\n')
-        elif dimension == 1:
-            if n is None or m is None:
-                if isinstance(M, list):
-                    n = len(M)
-                    m = 1
-                elif isinstance(M, np.ndarray):
-                    n = M.size
-                    m = 1
-            imax = 0
-            while imax < m:
-                imin = imax + 1
-                imax = imax + mmax
-                if imax > m:
-                    imax = m
+                    file.write(f" {ao_labels[j]:12s}")
+                for i in range(imin - 1, imax):
+                    file.write(f"{M[j][i]:{format}} ")
+                file.write("\n")
+
+    elif dimension == 1:
+        if n is None or m is None:
+            if isinstance(M, list):
+                n = len(M)
+                m = 1
+            elif isinstance(M, np.ndarray):
+                n = M.size
+                m = 1
+        imax = 0
+        while imax < m:
+            imin = imax + 1
+            imax = imax + mmax
+            if imax > m:
+                imax = m
+            if eig is None:
+                file.write("           ")
+            else:
+                file.write(" eig:  ")
+
+            for i in range(imin - 1, imax):
                 if eig is None:
-                    file.write("           ")
+                    file.write(f"{i:{digits-6}d}          ")
                 else:
-                    file.write(" eig:  ")
-                    
-                for i in range(imin-1, imax):
-                    if eig is None:
-                        file.write(f"{i:{digits-6}d}          ")
-                    else:
-                        file.write(f"  {eig[i]:{format}}  ")
-                file.write('\n')
-                for j in range(n):
-                    if n > 1:
-                        file.write(f" {j:4d}  ")
-                    else:
-                        file.write(f"       ")
-                    for i in range(imin-1, imax):
-                        file.write(f"  {M[j + i*n]:{format}}  ")
-                    file.write('\n')
-        file.write('\n')
-        file.flush()
+                    file.write(f"  {eig[i]:{format}}  ")
+            file.write("\n")
+            for j in range(n):
+                if n > 1:
+                    file.write(f" {j:4d}  ")
+                else:
+                    file.write(f"       ")
+                for i in range(imin - 1, imax):
+                    file.write(f"  {M[j + i * n]:{format}}  ")
+                file.write("\n")
+
+    file.write("\n")
+    file.flush()
     if should_close:
-        file.close()        
+        file.close()
+
