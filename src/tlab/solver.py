@@ -121,7 +121,15 @@ def davidson(H, S=None, *, nroots=1, diag=None, Sdiag=None, init_guess=None, thr
     if diag is None:
         Hdiag_list = np.diag(H)
     else:
-        Hdiag_list = diag
+        try:
+            Hdiag_list = diag.flatten()
+        except:
+            Hdiag_list = diag
+    if Sdiag is not None:
+        try:
+            Sdiag_list = Sdiag.flatten()
+        except:
+            Sdiag_list = Sdiag
     Ssub = np.zeros(0, float)
     norms = np.zeros(nroots)
     converge = [False for x in range(nroots)]
@@ -255,18 +263,19 @@ def davidson(H, S=None, *, nroots=1, diag=None, Sdiag=None, init_guess=None, thr
                 for k in range(NDim):
                     if abs(Hdiag_list[k] - E[i] *Sdiag_list[k])   > 1e-8:
                         new_state[k] = - residual[k] / (Hdiag_list[k] - E[i]*Sdiag_list[k])
-                        if verbose >= 3:
-                            print(f"{k}  {residual[k]:16.10f}, {Hdiag_list[k] - E[i]*Sdiag_list[k]:16.10f}")
+                        #if verbose >= 3:
+                        #    print(f"{k}  {residual[k]:16.10f} / {Hdiag_list[k] - E[i]*Sdiag_list[k]:16.10f}")
                     else:
                         # Changed 1e14 to 1e4 (just perturb a little bit...)
                         new_state[k] = - residual[k] / 1e4
+                if verbose >= 2:
+                    printmat(new_state, 'Updated vector (not orthogonal)')
                 #printmat(new_state,'new_state (unorthonormal')
                 # Gram-Schmidt orthogonalization
                 state = new_state.copy()
                 Sstate = S_op(state)
                 norm2 = np.sqrt(state.T@Sstate)
                 #X = (np.array(states)).T
-                #printmat(X.T@S@X)
                 state /= norm2
                 if norm2 < 1e-6:
                     reset = True
@@ -281,6 +290,7 @@ def davidson(H, S=None, *, nroots=1, diag=None, Sdiag=None, init_guess=None, thr
                         break
                 else:
                     norm2 = np.sqrt(state.T@S_op(state))
+                    print('state.T @ S @ state',norm2)
                     state /= norm2
                     #print(state.T@S@state)
                     states.append(state)

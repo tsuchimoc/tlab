@@ -63,7 +63,10 @@ def _parse_matrix_from(lines: list[str], start_idx: int):
             row = int(toks[0])
             vals_str = toks[1:]
             if len(vals_str) >= ncols:
-                vals = [float(v.replace("D","E").replace("d","e")) for v in vals_str[:ncols]]
+                try:
+                    vals = [float(v.replace("D","E").replace("d","e")) for v in vals_str[:ncols]]
+                except:
+                    return None
                 return row, vals
             floats = _FLOAT_RE.findall(line)
             if len(floats) >= ncols:
@@ -157,6 +160,7 @@ def _parse_matrix_from(lines: list[str], start_idx: int):
 
                 if label_mode is not True:
                     parsed_num = _try_parse_numeric_row(line, ncols=len(current_cols))
+                    # Trim 
                     if parsed_num is not None and label_mode is None:
                         label_mode = False  # 最初のデータで固定
                         expected_row_idx = None
