@@ -1,4 +1,5 @@
 import numpy as np
+from time import time
 from .matrix import printmat, MatBlock
 from .linalg import symm, Lowdin_orthonormalization
 
@@ -52,6 +53,9 @@ def davidson(H, S=None, *, nroots=1, diag=None, Sdiag=None, init_guess=None, thr
       `callable` function to avoid explicit matrix storage.
     - If the overlap matrix S is supplied, it should be symmetric positive-definite.
     """
+
+    # Timing
+    t_init = time()
     
     if isinstance(H, np.ndarray):
         H_mat = H
@@ -187,8 +191,8 @@ def davidson(H, S=None, *, nroots=1, diag=None, Sdiag=None, init_guess=None, thr
     ## Orthogonalize
     nvec = len(states)
 
-    vec = np.zeros((nvec, NDim), float)
-    Hvec = np.zeros((nvec, NDim), float)
+    vec = np.zeros((max(nvec,nroots), NDim), float)
+    Hvec = np.zeros((max(nvec,nroots), NDim), float)
     
     # Sstates = S @ state
     Sstates = [S_op(v) for v in states] 
@@ -217,17 +221,24 @@ def davidson(H, S=None, *, nroots=1, diag=None, Sdiag=None, init_guess=None, thr
     Hsub = np.zeros(0, float)
     Ssub = np.zeros(0, float)  
     nroots_ = len(states)
-    if verbose >= 0:
+    if verbose == 0:
         print('Cycle    State       Energy        Grad')
+    elif verbose > 0:
+        print('Cycle    State       Energy        Grad      Time(s)')
     while icyc < maxiter:
         ### Subspace Hamiltonian
         ntargets = len(states) - len(Hstates) 
         len_states = len(states)
         for i in range(ioff, ioff+ntargets):
-            if verbose >= 2:
+            if verbose >= 3:
                 printmat(states[i], 'Trial vector')
+            # Timing
+            t0 = time()
             Hstates.append(H_op(states[i]))
             Sstates.append(S_op(states[i]))
+            # Timing
+            t1 = time()
+            t_sigma = t1 - t0
             for j in range(i+1):
                 Hij = states[j] @ Hstates[i]
                 Hsub = np.append(Hsub, Hij)
@@ -237,10 +248,13 @@ def davidson(H, S=None, *, nroots=1, diag=None, Sdiag=None, init_guess=None, thr
         Hsub_symm = symm(Hsub)
         Ssub_symm = symm(Ssub)
         E, V = np.linalg.eigh(Hsub_symm)
-        if verbose >= 1:
+        if verbose >= 2:
             printmat(Hsub_symm, title='Subspace Hamiltonian')
             printmat(V, eig=E, title='Eigen-set')
         reset = False 
+        # Timing
+        t2 = time()
+        t_sub = t2 - t1
         for i in range(min(nroots, len_states)):
             vec[i] *= 0
             Hvec[i] *= 0
@@ -248,7 +262,7 @@ def davidson(H, S=None, *, nroots=1, diag=None, Sdiag=None, init_guess=None, thr
                 vec[i] += states[j] * V[j, i]
                 Hvec[i] += Hstates[j] * V[j, i] 
             residual = Hvec[i] - E[i] * S_op(vec[i])
-            if verbose >= 2:
+            if verbose >= 3:
                 printmat(residual, 'Residual vector')
             #print('state',i)
             #printmat(Hvec.T, 'AX vector')
@@ -268,7 +282,7 @@ def davidson(H, S=None, *, nroots=1, diag=None, Sdiag=None, init_guess=None, thr
                     else:
                         # Changed 1e14 to 1e4 (just perturb a little bit...)
                         new_state[k] = - residual[k] / 1e4
-                if verbose >= 2:
+                if verbose >= 3:
                     printmat(new_state, 'Updated vector (not orthogonal)')
                 #printmat(new_state,'new_state (unorthonormal')
                 # Gram-Schmidt orthogonalization
@@ -290,7 +304,6 @@ def davidson(H, S=None, *, nroots=1, diag=None, Sdiag=None, init_guess=None, thr
                         break
                 else:
                     norm2 = np.sqrt(state.T@S_op(state))
-                    print('state.T @ S @ state',norm2)
                     state /= norm2
                     #print(state.T@S@state)
                     states.append(state)
@@ -298,8 +311,11 @@ def davidson(H, S=None, *, nroots=1, diag=None, Sdiag=None, init_guess=None, thr
                         #print_state(old_state)
                         if abs(old_state @ state) > 1e-8:
                             reset = True
-                if verbose >= 2:
+                if verbose >= 3:
                     printmat(state, 'Updated vector (orthogonal)')
+        # Timing
+        t3 = time()
+        t_update = t3 - t2
         #printmat(s)
         if verbose >= 0:
             print(f'[{icyc:3d}]        0:  {E[0]:+.10f}   {norms[0]:.2e}  ', end='')
@@ -313,6 +329,9 @@ def davidson(H, S=None, *, nroots=1, diag=None, Sdiag=None, init_guess=None, thr
                     print('converged')
                 else:
                     print('')
+            if verbose >= 1:
+                print('Timing (sec)')
+                print(f'  sigma-vector: {t_sigma:10.2f}   subspace: {t_sub:10.2f}   update: {t_update:10.2f}')
         if all (converge): 
             print(f'\nAll {nroots} states converged.')
             for k in range(nroots):
@@ -330,6 +349,9 @@ def davidson(H, S=None, *, nroots=1, diag=None, Sdiag=None, init_guess=None, thr
         icyc += 1
     nret = min(nroots, len(E))
     result = MatBlock(M=vec[:nret].T, eig=E[:nret], ao_labels=None)
+    t_last = time()
+    if verbose > 1:
+        print(f'Total job time: {t_last-t_init:15.2f} sec.')
     return result
 
 
