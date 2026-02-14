@@ -1,4 +1,13 @@
+from __future__ import annotations
+
+import sys
+import math
+import re
 import numpy as np
+from collections import deque
+from typing import List, Tuple, Optional, TextIO, Dict, Union
+
+NumberOrVar = Union[float, str]
 def geom_rmsd(R1, R2, save=None):
     """
         構造R1と構造R2を比較し、各原子間の距離のRMSDが最小になるように重ね合わせるように形状を変えずにR2を動かす。
@@ -164,16 +173,6 @@ Variable definitions may appear later:
   VAR=number
 """
 
-from __future__ import annotations
-
-import sys
-import math
-import re
-import numpy as np
-from collections import deque
-from typing import List, Tuple, Optional, TextIO, Dict, Union
-
-NumberOrVar = Union[float, str]
 
 # ------------------------------------------------------------
 # Covalent radii (Å) — extended set (heuristic for bond guessing)
@@ -730,8 +729,6 @@ def xyz_to_zmatrix_with_targets(
     return lines, varmap
 
 # ------------------------------------------------------------
-# Wrappers: xyz2zmat / zmat2xyz  (your requested names)
-# ------------------------------------------------------------
 def xyz2zmat(
     xyz_path: str,
     *,
@@ -746,10 +743,122 @@ def xyz2zmat(
     out: Optional[str] = None,
 ) -> Tuple[List[str], Dict[str, float]]:
     """
-    File-based wrapper.
-    If any targets are provided, uses xyz_to_zmatrix_with_targets.
-    Otherwise, uses heuristic xyz_to_zmatrix.
-    If out is given, writes ZMAT file.
+    Convert an XYZ file to a (Gaussian-like) Z-matrix, optionally forcing
+    *multiple* internal coordinates (bonds/angles/dihedrals) to appear
+    explicitly as named variables.
+
+    This is the recommended high-level entry point for building a Z-matrix
+    that you can later edit (e.g., change a torsion) and convert back to XYZ.
+
+    Parameters
+    ----------
+    xyz_path
+        Path to input XYZ file (standard 2-line header XYZ).
+    bonds
+        Optional list of (A, B) pairs (0-based indices in the ORIGINAL XYZ).
+        Each pair enforces the distance(A-B) as a *variable* on the atom B line,
+        i.e., atom B is defined with bond reference A:
+            B  A  R_A_B  ...
+        This means you control R(A,B) by editing that variable in the Z-matrix.
+
+        Example:
+            bonds=[(0,1), (1,2)]  enforces R(1-2) and R(2-3) (in 1-based labels).
+
+    angles
+        Optional list of (A, B, C) triples (0-based indices in the ORIGINAL XYZ)
+        enforcing angle(A-B-C) as a *variable* on the atom C line, with references
+        (bond_ref=B, angle_ref=A). This works because:
+            angle(C, B, A) == angle(A, B, C)
+
+        Z-matrix line pattern for atom C:
+            C  B  R  A  A_A_B_C  ...
+
+    dihedrals
+        Optional list of (A, B, C, D) quadruples (0-based indices in the ORIGINAL XYZ)
+        enforcing dihedral(A-B-C-D) as a *variable* on the atom D line, with references
+        (bond_ref=C, angle_ref=B, dihed_ref=A). This works because:
+            dihedral(D, C, B, A) == dihedral(A, B, C, D)
+
+        Z-matrix line pattern for atom D:
+            D  C  R  B  A  A  PHI_A_B_C_D
+
+        This is the key for your use-case:
+            dihedrals=[(C2,C1,C8,C9)]  => enforce torsion on atom C9 line.
+
+    bond_names / angle_names / dihedral_names
+        Optional lists of variable names (strings). If provided, each list must have
+        the same length as its corresponding targets list.
+        If omitted, default names are generated:
+            bond:     R_<A+1>_<B+1>
+            angle:    A_<A+1>_<B+1>_<C+1>
+            dihedral: PHI_<A+1>_<B+1>_<C+1>_<D+1>
+        Note: these indices in names are 1-based ORIGINAL XYZ indices.
+
+    scale
+        Scale factor for covalent-radius-based bond guessing, used only when choosing
+        fallback references for *non-forced* atoms (and to pick reasonable refs when
+        some refs are not specified). Typical values: 1.20–1.35.
+        This does NOT affect forced targets themselves.
+    header
+        If True, prepend comment lines explaining format/conventions.
+    out
+        If provided, write the resulting Z-matrix text to this file path.
+        If None, nothing is written (you still get the lines returned).
+
+    Returns
+    -------
+    zmat_lines
+        List of lines (strings) representing the Z-matrix file content.
+        The end of the Z-matrix includes a variable-definition block:
+            VAR=number
+        for every forced target variable.
+    varmap
+        dict mapping variable name -> default numeric value taken from the input XYZ.
+
+    Raises
+    ------
+    ValueError
+        If any of the following occurs:
+        - Index out of range or duplicated indices in a single target
+        - Conflicting constraints on the same defined atom:
+            * e.g., specifying bonds (A,B) and (C,B) would demand two different
+              bond references for atom B
+            * similarly for angle/dihedral references
+        - Cyclic dependency in constraints (impossible Z-matrix dependency graph):
+            * e.g., forcing both (A,B) and (B,A)
+        - A constraint would require an atom to appear too early in the Z-matrix:
+            * angle requires the constrained atom to appear at position >= 3
+            * dihedral requires position >= 4
+          (this is usually guaranteed by dependencies; if not, you get an error)
+
+    Notes
+    -----
+    - The Z-matrix ordering is chosen to satisfy dependency constraints strictly.
+      It is not guaranteed to be “chemically pretty” (though it is valid).
+    - Forced targets are guaranteed to appear as variables in the output.
+      That is the point of this wrapper.
+    - For editing only torsions/bonds and converting back, this is typically sufficient.
+
+    Examples
+    --------
+    1) Force two bond lengths and one torsion (stilbene-style):
+
+    >>> zlines, varmap = xyz2zmat(
+    ...     "stilbene_cis.xyz",
+    ...     bonds=[(0,1), (1,2)],                 # R_1_2, R_2_3
+    ...     dihedrals=[(1,0,7,8)],                # PHI_2_1_8_9
+    ...     out="stilbene_cis_forced.zmat",
+    ... )
+
+    2) Provide custom variable names:
+
+    >>> zlines, varmap = xyz2zmat(
+    ...     "mol.xyz",
+    ...     bonds=[(0,1)],
+    ...     bond_names=["R12"],
+    ...     dihedrals=[(1,0,7,8)],
+    ...     dihedral_names=["PHI_TARGET"],
+    ... )
     """
     elems, coords = read_xyz(xyz_path)
 
@@ -770,6 +879,7 @@ def xyz2zmat(
 
     return zlines, varmap
 
+
 def zmat2xyz(
     zmat_path: str,
     *,
@@ -778,10 +888,79 @@ def zmat2xyz(
     out: Optional[str] = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    File-based wrapper.
-    Reads ZMAT + varmap, applies overrides, builds XYZ.
-    If out is given, writes XYZ file.
-    Returns (elems_array, coords).
+    Convert a Z-matrix file (Gaussian-like subset, optionally with variables)
+    back to an XYZ geometry.
+
+    This is the recommended high-level entry point for:
+      1) taking a Z-matrix produced by xyz2zmat(),
+      2) overriding one or more internal-coordinate variables (e.g., a torsion),
+      3) reconstructing Cartesian coordinates.
+
+    Parameters
+    ----------
+    zmat_path
+        Path to input Z-matrix file.
+        The file may contain variable definitions (VAR=number) anywhere after the
+        atom lines (blank lines/comments allowed).
+    overrides
+        Optional dict {varname: value} to override variables read from the file.
+        Typical use: change a single torsion variable to match another method.
+
+        Example:
+            overrides={"PHI_2_1_8_9": -143.036717}
+
+        If a variable appears in overrides but not in the file, it is added
+        to the internal varmap for resolution; however, if the Z-matrix atom lines
+        never reference that variable name, it has no effect.
+    comment
+        Comment line to write in XYZ (2nd line of XYZ).
+    out
+        If provided, write the resulting XYZ to this file path.
+        If None, nothing is written (you still get arrays returned).
+
+    Returns
+    -------
+    elems
+        np.ndarray of element symbols (shape (N,), dtype=str).
+    coords
+        np.ndarray of Cartesian coordinates in Å (shape (N,3), dtype=float).
+
+    Raises
+    ------
+    ValueError
+        If:
+        - The Z-matrix format is unsupported (wrong number of tokens per line)
+        - A variable name is used in an atom line but is not defined in the file
+          and not provided in overrides
+        - Conversion encounters a pathological reference geometry (rare; e.g.,
+          collinear references causing numerical degeneracy). The implementation
+          includes fallbacks, but extreme cases may still error.
+
+    Notes
+    -----
+    - This function reconstructs one valid Cartesian embedding of the internal
+      coordinates. Z-matrices can admit multiple embeddings (mirror images)
+      depending on conventions; the algorithm here follows a consistent convention.
+    - If your workflow is:
+          xyz2zmat -> edit PHI -> zmat2xyz
+      then the resulting structure will change primarily around the targeted torsion,
+      while all other internal coordinates are kept as specified by the Z-matrix
+      (either numeric constants or other variables).
+
+    Examples
+    --------
+    1) Change one torsion and write XYZ:
+
+    >>> elems, xyz = zmat2xyz(
+    ...     "stilbene_cis_forced.zmat",
+    ...     overrides={"PHI_2_1_8_9": -143.036717},
+    ...     out="stilbene_phi_to_ecis.xyz",
+    ... )
+
+    2) No overrides (use file’s own variables/constants), print to stdout:
+
+    >>> elems, xyz = zmat2xyz("mol.zmat")
+    >>> write_xyz(elems, xyz)
     """
     elems, refs, vals, varmap = read_zmatrix(zmat_path)
     if overrides:
@@ -795,10 +974,6 @@ def zmat2xyz(
             write_xyz(elems_arr, coords, file=f, comment=comment)
 
     return elems_arr, coords
-
-# Backward-compatible aliases (optional; keep if you used them elsewhere)
-xyz_to_zmat = xyz2zmat
-zmat_to_xyz = zmat2xyz
 
 # ------------------------------------------------------------
 # CLI: python -m tlab.geom xyz2zmat ... / zmat2xyz ...
